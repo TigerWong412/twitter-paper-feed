@@ -25,7 +25,7 @@ jobs:
 
       - name: Write Google creds to file
         run: |
-          echo "${{ secrets.GOOGLE_CREDENTIALS_JSON }}" > service_account.json
+          printf '%s' "${{ secrets.GOOGLE_CREDENTIALS_JSON }}" > service_account.json
 
       - name: Run monitor script
         env:
