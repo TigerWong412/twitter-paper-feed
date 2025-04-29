@@ -33,7 +33,7 @@ jobs:
           import json
           # Try to parse the file; crash if invalid
           with open("service_account.json") as f:
-          json.load(f)
+              json.load(f)
           print("✅ service_account.json is valid JSON")
           EOF
 
