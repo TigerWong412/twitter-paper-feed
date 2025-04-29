@@ -14,7 +14,7 @@ from google.oauth2.service_account import Credentials
 
 # Environment vars:
 TW_BEARER_TOKEN    = os.environ["TW_BEARER_TOKEN"]
-SPREADSHEET_NAME   = os.environ.get("SPREADSHEET_NAME", "My Research Feed")
+SPREADSHEET_NAME   = os.environ.get("Twitter nanomotorupdate", "My Research Feed")
 SERVICE_ACCOUNT_FN = "service_account.json"
 
 # How many tweets to fetch at once (up to 100)
@@ -164,7 +164,7 @@ def process_new_papers(username: str):
             logger.error(f"Error processing tweet {tw.id}: {e}", exc_info=True)
 
 if __name__ == "__main__":
-    TW_USERNAME = os.environ.get("TW_USERNAME", "<twitter_handle_here>")
+    TW_USERNAME = os.environ.get("nanomotorupdate", "<twitter_handle_here>")
     if TW_USERNAME.startswith("<"):
         logger.error("Please set TW_USERNAME env var to the Twitter handle (without @).")
         exit(1)
