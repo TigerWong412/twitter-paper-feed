@@ -27,6 +27,16 @@ jobs:
         run: |
           printf '%s' "${{ secrets.GOOGLE_CREDENTIALS_JSON }}" > service_account.json
 
+      - name: Validate service_account.json
+        run: |
+          python - << 'EOF'
+          import json
+          # Try to parse the file; crash if invalid
+          with open("service_account.json") as f:
+          json.load(f)
+          print("✅ service_account.json is valid JSON")
+          EOF
+
       - name: Run monitor script
         env:
           TW_BEARER_TOKEN: ${{ secrets.TW_BEARER_TOKEN }}
