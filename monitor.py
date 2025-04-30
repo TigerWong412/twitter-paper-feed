@@ -164,8 +164,8 @@ def init_sheet():
         scopes=["https://www.googleapis.com/auth/spreadsheets"]
     )
     client = gspread.authorize(creds)
-    return client.open(SPREADSHEET_NAME).sheet1
-
+    return client.open_by_key("1oYdQyh1tqPA3821PE97ru8aL8jZOe1e7vKLp2x7BSF8").sheet1
+    
 def append_row(sheet, meta: dict, abstract: str, source: str):
     """
     Append one row of metadata + abstract + source (URL or tweet) to Google Sheet
