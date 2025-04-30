@@ -30,9 +30,6 @@ logger = logging.getLogger(__name__)
 
 # ── HISTORICAL IMPORT ─────────────────────────────────────────────────────────────
 def fetch_historical_urls() -> list[str]:
-    """
-    Read URLs from the uploaded extracted_tweets.txt file.
-    """
     if not HISTORICAL_FILE.exists():
         logger.warning(f"Historical file not found: {HISTORICAL_FILE}")
         return []
@@ -41,9 +38,6 @@ def fetch_historical_urls() -> list[str]:
 
 # ── LIVE TWEET FETCH ─────────────────────────────────────────────────────────────
 def fetch_new_tweets() -> list[tweepy.Tweet]:
-    """
-    Fetch new tweets from TW_USERNAME since START_TIME, tracking SINCE_ID_FILE.
-    """
     client = tweepy.Client(bearer_token=TW_BEARER_TOKEN)
     try:
         user = client.get_user(username=TW_USERNAME).data
@@ -51,16 +45,14 @@ def fetch_new_tweets() -> list[tweepy.Tweet]:
         logger.error(f"Unable to fetch user '{TW_USERNAME}': {e}")
         return []
 
-    params = {
-        "tweet_fields": ["entities","created_at"],
-        "max_results": MAX_RESULTS,
-        "start_time": START_TIME
-    }
+    params = {"tweet_fields": ["entities","created_at"], "max_results": MAX_RESULTS}
     if SINCE_ID_FILE.exists():
         try:
             params["since_id"] = int(SINCE_ID_FILE.read_text().strip())
         except ValueError:
             pass
+    else:
+        params["start_time"] = START_TIME
 
     resp = client.get_users_tweets(id=user.id, **params)
     tweets = resp.data or []
@@ -72,12 +64,9 @@ def fetch_new_tweets() -> list[tweepy.Tweet]:
 
 # ── DOI EXTRACTION ──────────────────────────────────────────────────────────────
 def extract_doi(url: str) -> str | None:
-    # 1) Direct DOI in URL
     m = re.search(r"(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)", url)
     if m:
         return m.group(1)
-
-    # 2) Follow redirects
     try:
         head = requests.head(url, allow_redirects=True, timeout=10)
         m2 = re.search(r"(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)", head.url)
@@ -85,8 +74,6 @@ def extract_doi(url: str) -> str | None:
             return m2.group(1)
     except:
         pass
-
-    # 3) HTML meta tag fallback
     try:
         html = requests.get(url, timeout=10).text
         m3 = re.search(r'<meta name="citation_doi" content="([^"]+)"', html)
@@ -94,7 +81,6 @@ def extract_doi(url: str) -> str | None:
             return m3.group(1)
     except:
         pass
-
     return None
 
 # ── METADATA & ABSTRACT ─────────────────────────────────────────────────────────
@@ -106,30 +92,31 @@ def fetch_metadata(doi: str) -> dict:
     title   = msg.get("title", [""])[0]
     journal = msg.get("container-title", [""])[0]
     authors = [f"{a.get('given','')} {a.get('family','')}".strip() for a in msg.get("author", [])]
+    # Extract publication date YYYY-MM-DD
+    pub = msg.get("published-print") or msg.get("published-online") or {}
+    parts = pub.get("date-parts", [[None]])[0]
+    pub_date = "-".join(str(p) for p in parts if p is not None) if parts[0] else ""
     issued  = msg.get("issued", {})
     year    = issued.get("date-parts", [[None]])[0][0]
     return {
         "title": title,
-        "journal": journal,
         "authors": authors,
+        "journal": journal,
         "year": year,
-        "volume": msg.get("volume", ""),
-        "issue": msg.get("issue", ""),
-        "pages": msg.get("page", ""),
-        "publisher": msg.get("publisher", ""),
+        "pub_date": pub_date,
         "doi": doi
     }
 
 def fetch_abstract(doi: str) -> str:
-    # Semantic Scholar
     ss_url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=abstract"
     try:
         r = requests.get(ss_url, timeout=10)
-        if r.status_code == 200 and (abstract := r.json().get("abstract")):
-            return abstract
+        if r.status_code == 200:
+            data = r.json()
+            if abstract := data.get("abstract"):
+                return abstract
     except:
         pass
-    # Crossref XML fallback
     xml_url = f"https://api.crossref.org/works/{doi}.xml"
     try:
         x = requests.get(xml_url, timeout=10)
@@ -144,34 +131,35 @@ def fetch_abstract(doi: str) -> str:
 
 # ── GOOGLE SHEETS ───────────────────────────────────────────────────────────────
 def init_sheet():
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FN, scopes=scopes)
     client = gspread.authorize(creds)
     return client.open_by_key(SPREADSHEET_ID).sheet1
 
 
-def append_row(sheet, meta: dict, abstract: str, source: str):
+def append_row(sheet, meta: dict, abstract: str, source_url: str, tweet_date: str = ""):
     row = [
         meta["title"],
         "; ".join(meta["authors"]),
         meta["journal"],
         meta["year"],
-        meta["doi"],
+        meta["pub_date"],
         abstract,
-        source
+        meta["doi"],
+        source_url,
+        tweet_date
     ]
     sheet.append_row(row, value_input_option="USER_ENTERED")
     logger.info(f"Appended {meta['doi']}")
+    # Resort by publication date descending
+    sheet.sort((5, "desc"))
 
 # ── MAIN WORKFLOW ──────────────────────────────────────────────────────────────
 def main():
     sheet = init_sheet()
 
-    # 1) One-off historical import
-    if not SINCE_ID_FILE.exists():
+    # Historical import (manual run)
+    if '--historical' in os.sys.argv:
         urls = fetch_historical_urls()
         seen = set()
         for url in urls:
@@ -188,21 +176,22 @@ def main():
                 append_row(sheet, meta, abstract, url)
             except Exception as e:
                 logger.error(f"Historical processing failed for DOI {doi}: {e}")
+        return
 
-    # 2) Live import of new tweets
+    # Live import (scheduled run)
     tweets = fetch_new_tweets()
     for tw in tweets:
         for u in (tw.entities or {}).get("urls", []):
-            url = u.get("expanded_url")
-            doi = extract_doi(url)
+            source = u.get("expanded_url")
+            doi = extract_doi(source)
             if not doi:
-                logger.info(f"Skipping live URL (no DOI): {url}")
+                logger.info(f"Skipping live URL (no DOI): {source}")
                 continue
             try:
                 meta = fetch_metadata(doi)
                 abstract = fetch_abstract(doi)
-                tweet_url = f"https://twitter.com/{TW_USERNAME}/status/{tw.id}"
-                append_row(sheet, meta, abstract, tweet_url)
+                tweet_date = tw.created_at.isoformat()
+                append_row(sheet, meta, abstract, source, tweet_date)
             except Exception as e:
                 logger.error(f"Live processing failed for DOI {doi}: {e}")
 
