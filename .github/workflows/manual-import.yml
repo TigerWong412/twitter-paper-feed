@@ -28,11 +28,11 @@ jobs:
       - name: Validate credentials JSON
         run: |
           python - << 'EOF'
-import json
-with open('service_account.json') as f:
-    json.load(f)
-print('✅ service_account.json is valid JSON')
-EOF
+          import json
+          with open('service_account.json') as f:
+            json.load(f)
+          print('✅ service_account.json is valid JSON')
+          EOF
 
 
       - name: Run historical import
