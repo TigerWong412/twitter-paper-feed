@@ -25,7 +25,8 @@ jobs:
 
       - name: Write Google creds to file
         run: |
-          printf '%s' "${{ secrets.GOOGLE_CREDENTIALS_JSON }}" > service_account.json
+          echo "${{ secrets.GOOGLE_CREDENTIALS_B64 }}" | base64 --decode > service_account.json
+
 
       - name: Validate service_account.json
         run: |
