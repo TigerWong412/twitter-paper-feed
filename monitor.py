@@ -19,7 +19,7 @@ SERVICE_ACCOUNT_FN = "service_account.json"                      # Service accou
 HISTORICAL_FILE    = Path("extracted_tweets.txt")                # Historical tweets file
 SINCE_ID_FILE      = Path("since_id.txt")                        # Tracks last seen tweet ID
 START_TIME         = "2025-03-25T00:00:00Z"                       # Only fetch tweets after this date initially
-MAX_RESULTS        = 100                                           # Max tweets per API call
+MAX_RESULTS        = 10                                           # Max tweets per API call
 
 # ── LOGGING SETUP ────────────────────────────────────────────────────────────────
 logging.basicConfig(
