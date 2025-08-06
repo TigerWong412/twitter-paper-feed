@@ -44,4 +44,4 @@ jobs:
 
       - name: Run live import
         run: |
-          python monitor.py --live
+          python monitor-nitter.py --live
