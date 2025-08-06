@@ -39,4 +39,4 @@ jobs:
       - name: Run live import
         # 移除 TW_BEARER_TOKEN 环境变量（不再需要）
         run: |
-          python monitor.py --live  # 保持触发命令不变，但脚本内部逻辑已修改
+          python monitor-snscrape.py --live  # 保持触发命令不变，但脚本内部逻辑已修改
