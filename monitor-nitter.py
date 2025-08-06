@@ -66,11 +66,9 @@ def fetch_new_tweets_nitter(since_id: int | None) -> list[dict]:
             resp = requests.get(url, headers=headers, timeout=10)
             logger.info(f"请求 {url} 返回状态码 {resp.status_code}")
             snippet = resp.text[:500].replace('\n', ' ')
-            logger.debug(f"HTML 片段: {snippet!r}")
-            if resp.status_code == 429:
-                logger.warning(f"{base} 返回 429 Too Many Requests，尝试下一个镜像")
-                continue
+            logger.info(f"页面 HTML 片段: {snippet!r}")
             resp.raise_for_status()
+
             break
         except HTTPError as e:
             logger.warning(f"{base} HTTP 错误：{e}")
