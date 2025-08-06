@@ -3,6 +3,8 @@ import os
 import re
 import sys
 import logging
+import time
+from requests.exceptions import HTTPError
 from pathlib import Path
 from datetime import datetime
 
@@ -12,6 +14,11 @@ import gspread
 import xml.etree.ElementTree as ET
 from google.oauth2.service_account import Credentials
 
+NITTER_INSTANCES = [
+    "https://nitter.net",
+    "https://nitter.snopyta.org",
+    "https://nitter.kavin.rocks",
+]
 # ── CONFIG ─────────────────────────────────────────────────────────────────────
 TW_USERNAME        = "nanomotorupdate"
 SPREADSHEET_ID     = "1oYdQyh1tqPA3821PE97ru8aL8jZOe1e7vKLp2x7BSF8"
@@ -37,23 +44,44 @@ def fetch_historical_urls() -> list[str]:
 
 # ── LIVE TWEET FETCH (Nitter 版) ────────────────────────────────────────────────
 def fetch_new_tweets_nitter(since_id: int | None) -> list[dict]:
-    url = f"https://nitter.net/{TW_USERNAME}"
-    resp = requests.get(url, timeout=10)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "lxml")
-
     tweets = []
+    resp = None
+
+    # 轮流尝试多个 Nitter 镜像
+    for base in NITTER_INSTANCES:
+        url = f"{base}/{TW_USERNAME}"
+
+        # —— 关键：每次请求前都睡够 1.1 秒，确保不超过 1 次／秒 —— 
+        time.sleep(1.1)
+
+        try:
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 429:
+                logger.warning(f"{base} 限流 429，换下一个实例")
+                continue
+            resp.raise_for_status()
+            break
+        except HTTPError as e:
+            logger.warning(f"{base} 请求失败：{e}")
+        except Exception as e:
+            logger.error(f"{base} 出现其他错误：{e}")
+
+    if not resp:
+        logger.error("所有 Nitter 实例均不可用，跳过本次抓取")
+        return []
+
+    soup = BeautifulSoup(resp.text, "lxml")
+    count = 0
+
     for item in soup.select("div.timeline-item"):
-        # 1) 用正确的类名选取推文的“固定链接”
         link = item.select_one("a.tweet-link")
         if not link or "/status/" not in link["href"]:
             continue
         tid = int(link["href"].split("/")[-1])
-        # since_id 去重
         if since_id and tid <= since_id:
             break
 
-        # 2) 解析推文时间
+        # 解析时间
         time_tag = item.select_one("span.tweet-date time")
         tweet_date = None
         if time_tag and time_tag.has_attr("datetime"):
@@ -61,23 +89,22 @@ def fetch_new_tweets_nitter(since_id: int | None) -> list[dict]:
                 time_tag["datetime"].replace("Z", "+00:00")
             )
 
-        # 3) 抽取所有正文外部链接（以 http 开头，排除内部 /username/status）
+        # 收集外链
         outlinks = []
         for a in item.select("div.tweet-content a"):
-            href = a.get("href", "")
+            href = a.get("href","")
             if href.startswith("http"):
                 outlinks.append(href)
 
         tweets.append({"id": tid, "date": tweet_date, "outlinks": outlinks})
-        if len(tweets) >= MAX_RESULTS:
+        count += 1
+        if count >= MAX_RESULTS:
             break
 
-    # 更新 since_id.txt
     if tweets:
         SINCE_ID_FILE.write_text(str(tweets[0]["id"]))
     logger.info(f"Fetched {len(tweets)} new tweets (via Nitter)")
     return tweets
-
 
 # ── DOI EXTRACTION ──────────────────────────────────────────────────────────────
 def extract_doi(url: str) -> str | None:
