@@ -18,6 +18,10 @@ NITTER_INSTANCES = [
     "https://nitter.net",
     "https://nitter.snopyta.org",
     "https://nitter.kavin.rocks",
+    "https://nitter.tedomum.net",
+    "https://nitter.pussthecat.org",
+    "https://nitter.invak.id",
+    "https://nitter.42l.fr",
 ]
 # ── CONFIG ─────────────────────────────────────────────────────────────────────
 TW_USERNAME        = "nanomotorupdate"
@@ -60,7 +64,7 @@ def fetch_new_tweets_nitter(since_id: int | None) -> list[dict]:
 
     # 依次尝试各镜像，直到拿到有效页面
     for base in NITTER_INSTANCES:
-        time.sleep(1.1)  # 确保请求不超过 1 次／秒
+        time.sleep(3)  # 确保请求不超过 1 次／秒
         url = f"{base}/{TW_USERNAME}"
         try:
             resp = requests.get(url, headers=headers, timeout=10)
