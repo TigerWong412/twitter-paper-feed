@@ -20,7 +20,20 @@ SINCE_ID_FILE      = Path("since_id.txt")
 START_TIME         = "2025-04-23T00:00:00Z"
 MAX_RESULTS        = 100
 
-# … 省略历史和元数据部分，保持不变 …
+# ── LOGGING SETUP ────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# ── HISTORICAL IMPORT ─────────────────────────────────────────────────────────────
+def fetch_historical_urls() -> list[str]:
+    if not HISTORICAL_FILE.exists():
+        logger.warning(f"Historical file not found: {HISTORICAL_FILE}")
+        return []
+    content = HISTORICAL_FILE.read_text(encoding="utf-8")
+    return re.findall(r'https?://\S+', content)
 
 # ── LIVE TWEET FETCH (Nitter 版) ────────────────────────────────────────────────
 def fetch_new_tweets_nitter(since_id: int | None) -> list[dict]:
@@ -62,6 +75,113 @@ def fetch_new_tweets_nitter(since_id: int | None) -> list[dict]:
         SINCE_ID_FILE.write_text(str(tweets[0]["id"]))
     logger.info(f"Fetched {len(tweets)} new tweets (via Nitter)")
     return tweets
+
+
+# ── DOI EXTRACTION ──────────────────────────────────────────────────────────────
+def extract_doi(url: str) -> str | None:
+    m = re.search(r"(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)", url)
+    if m:
+        return m.group(1)
+    try:
+        head = requests.head(url, allow_redirects=True, timeout=10)
+        m2 = re.search(r"(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)", head.url)
+        if m2:
+            return m2.group(1)
+    except:
+        pass
+    try:
+        html = requests.get(url, timeout=10).text
+        m3 = re.search(r'<meta name="citation_doi" content="([^"]+)"', html)
+        if m3:
+            return m3.group(1)
+    except:
+        pass
+    return None
+
+# ── METADATA & ABSTRACT ─────────────────────────────────────────────────────────
+def fetch_metadata(doi: str) -> dict:
+    api_url = f"https://api.crossref.org/works/{doi}"
+    r = requests.get(api_url, timeout=10)
+    r.raise_for_status()
+    msg = r.json()["message"]
+    title   = msg.get("title", [""])[0]
+    journal = msg.get("container-title", [""])[0]
+    authors = [f"{a.get('given','')} {a.get('family','')}".strip() for a in msg.get("author", [])]
+    pub = msg.get("published-print") or msg.get("published-online") or {}
+    parts = pub.get("date-parts", [[None]])[0]
+    pub_date = "-".join(str(p) for p in parts if p is not None) if parts[0] else ""
+    issued = msg.get("issued", {})
+    year   = issued.get("date-parts", [[None]])[0][0]
+    return {"title": title, "authors": authors, "journal": journal,
+            "year": year, "pub_date": pub_date, "doi": doi}
+
+
+def fetch_abstract(doi: str) -> str:
+    ss_url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=abstract"
+    try:
+        r = requests.get(ss_url, timeout=10)
+        if r.status_code == 200:
+            abs_txt = r.json().get("abstract")
+            if abs_txt:
+                return abs_txt
+    except:
+        pass
+    xml_url = f"https://api.crossref.org/works/{doi}.xml"
+    try:
+        x = requests.get(xml_url, timeout=10)
+        if x.status_code == 200:
+            root = ET.fromstring(x.content)
+            el = root.find(".//abstract")
+            if el is not None:
+                return ET.tostring(el, method="text", encoding="unicode").strip()
+    except:
+        pass
+    return ""
+
+# ── GOOGLE SHEETS ───────────────────────────────────────────────────────────────
+def init_sheet():
+    scopes = ["https://www.googleapis.com/auth/spreadsheets",
+              "https://www.googleapis.com/auth/drive"]
+    creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FN, scopes=scopes)
+    client = gspread.authorize(creds)
+    return client.open_by_key(SPREADSHEET_ID).sheet1
+
+
+def append_row(sheet, meta: dict, abstract: str, source_url: str, tweet_date: str = ""):
+    row = [
+        meta["title"],
+        "; ".join(meta["authors"]),
+        meta["journal"],
+        meta["year"],
+        meta["pub_date"],
+        abstract,
+        meta["doi"],
+        source_url,
+        tweet_date
+    ]
+    sheet.append_row(row, value_input_option="USER_ENTERED")
+    logger.info(f"Appended DOI {meta['doi']}")
+    sheet.sort((5, "desc"))
+
+# ── PROCESS HISTORICAL ─────────────────────────────────────────────────────────
+def process_historical():
+    sheet = init_sheet()
+    urls = fetch_historical_urls()
+    seen = set()
+    for url in urls:
+        if url in seen:
+            continue
+        seen.add(url)
+        doi = extract_doi(url)
+        if not doi:
+            logger.info(f"Skipping historical URL (no DOI): {url}")
+            continue
+        try:
+            meta = fetch_metadata(doi)
+            abstract = fetch_abstract(doi)
+            append_row(sheet, meta, abstract, url)
+        except Exception as e:
+            logger.error(f"Historical processing failed for DOI {doi}: {e}")
 
 # ── PROCESS LIVE ────────────────────────────────────────────────────────────────
 def process_live():
