@@ -44,36 +44,50 @@ def fetch_historical_urls() -> list[str]:
 
 # ── LIVE TWEET FETCH (Nitter 版) ────────────────────────────────────────────────
 def fetch_new_tweets_nitter(since_id: int | None) -> list[dict]:
+    """
+    通过 Nitter 抓取指定用户的新推文（自 since_id 之后），
+    并输出调试日志：HTTP 状态和解析到的节点数。
+    返回格式：[{ 'id': int, 'date': datetime, 'outlinks': [urls] }, …]
+    """
     tweets = []
     resp = None
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/115.0 Safari/537.36"
+        )
+    }
 
-    # 轮流尝试多个 Nitter 镜像
+    # 依次尝试各镜像，直到拿到有效页面
     for base in NITTER_INSTANCES:
+        time.sleep(1.1)  # 确保请求不超过 1 次／秒
         url = f"{base}/{TW_USERNAME}"
-
-        # —— 关键：每次请求前都睡够 1.1 秒，确保不超过 1 次／秒 —— 
-        time.sleep(1.1)
-
         try:
-            resp = requests.get(url, timeout=10)
+            resp = requests.get(url, headers=headers, timeout=10)
+            logger.info(f"请求 {url} 返回状态码 {resp.status_code}")
+            snippet = resp.text[:500].replace('\n', ' ')
+            logger.debug(f"HTML 片段: {snippet!r}")
             if resp.status_code == 429:
-                logger.warning(f"{base} 限流 429，换下一个实例")
+                logger.warning(f"{base} 返回 429 Too Many Requests，尝试下一个镜像")
                 continue
             resp.raise_for_status()
             break
         except HTTPError as e:
-            logger.warning(f"{base} 请求失败：{e}")
+            logger.warning(f"{base} HTTP 错误：{e}")
         except Exception as e:
-            logger.error(f"{base} 出现其他错误：{e}")
+            logger.error(f"{base} 请求失败：{e}")
 
     if not resp:
         logger.error("所有 Nitter 实例均不可用，跳过本次抓取")
-        return []
+        return tweets
 
     soup = BeautifulSoup(resp.text, "lxml")
-    count = 0
+    # 兼容老版和新版 Nitter 容器
+    items = soup.select("article.tweet, div.timeline-item")
+    logger.info(f"Parsed 推文节点数量: {len(items)}")
 
-    for item in soup.select("div.timeline-item"):
+    count = 0
+    for item in items:
         link = item.select_one("a.tweet-link")
         if not link or "/status/" not in link["href"]:
             continue
@@ -81,7 +95,7 @@ def fetch_new_tweets_nitter(since_id: int | None) -> list[dict]:
         if since_id and tid <= since_id:
             break
 
-        # 解析时间
+        # 解析发布时间
         time_tag = item.select_one("span.tweet-date time")
         tweet_date = None
         if time_tag and time_tag.has_attr("datetime"):
@@ -89,10 +103,10 @@ def fetch_new_tweets_nitter(since_id: int | None) -> list[dict]:
                 time_tag["datetime"].replace("Z", "+00:00")
             )
 
-        # 收集外链
+        # 解析正文中的外部链接
         outlinks = []
         for a in item.select("div.tweet-content a"):
-            href = a.get("href","")
+            href = a.get("href", "")
             if href.startswith("http"):
                 outlinks.append(href)
 
@@ -101,6 +115,7 @@ def fetch_new_tweets_nitter(since_id: int | None) -> list[dict]:
         if count >= MAX_RESULTS:
             break
 
+    # 更新 since_id.txt
     if tweets:
         SINCE_ID_FILE.write_text(str(tweets[0]["id"]))
     logger.info(f"Fetched {len(tweets)} new tweets (via Nitter)")
