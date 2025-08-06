@@ -1,0 +1,42 @@
+name: "🐦 Live Tweet Import-snscrape"
+
+on:
+  schedule:
+    - cron: '0 0 * * *'   # daily at midnight UTC
+  workflow_dispatch:
+
+jobs:
+  live-import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # 移除 tweepy，添加 snscrape
+          pip install requests gspread google-auth snscrape
+
+      - name: Write Google credentials
+        run: |
+          echo "${{ secrets.GOOGLE_CREDENTIALS_B64 }}" | base64 --decode > service_account.json
+
+      - name: Validate credentials JSON
+        run: |
+          python - << 'EOF'
+          import json
+          with open('service_account.json') as f:
+            json.load(f)
+          print('✅ service_account.json is valid JSON')
+          EOF
+
+      - name: Run live import
+        # 移除 TW_BEARER_TOKEN 环境变量（不再需要）
+        run: |
+          python monitor.py --live  # 保持触发命令不变，但脚本内部逻辑已修改
