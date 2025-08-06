@@ -37,12 +37,6 @@ def fetch_historical_urls() -> list[str]:
 
 # ── LIVE TWEET FETCH (Nitter 版) ────────────────────────────────────────────────
 def fetch_new_tweets_nitter(since_id: int | None) -> list[dict]:
-    """
-    通过 Nitter 抓取页面 HTML，解析出最近的推文：
-      - id: 推文 ID（int）
-      - date: 发布日期（datetime）
-      - outlinks: 推文中的外部链接列表
-    """
     url = f"https://nitter.net/{TW_USERNAME}"
     resp = requests.get(url, timeout=10)
     resp.raise_for_status()
@@ -50,27 +44,35 @@ def fetch_new_tweets_nitter(since_id: int | None) -> list[dict]:
 
     tweets = []
     for item in soup.select("div.timeline-item"):
-        a = item.select_one("a.tco-link")
-        if not a or "status" not in a["href"]:
+        # 1) 用正确的类名选取推文的“固定链接”
+        link = item.select_one("a.tweet-link")
+        if not link or "/status/" not in link["href"]:
             continue
-        tid = int(a["href"].rstrip("/").split("/")[-1])
+        tid = int(link["href"].split("/")[-1])
+        # since_id 去重
         if since_id and tid <= since_id:
             break
 
-        # 解析时间
+        # 2) 解析推文时间
         time_tag = item.select_one("span.tweet-date time")
-        date = None
+        tweet_date = None
         if time_tag and time_tag.has_attr("datetime"):
-            date = datetime.fromisoformat(time_tag["datetime"].replace("Z", "+00:00"))
+            tweet_date = datetime.fromisoformat(
+                time_tag["datetime"].replace("Z", "+00:00")
+            )
 
-        # 解析外部链接
-        outlinks = [lnk["href"] for lnk in item.select("div.tweet-content a.tco-link") if lnk.get("href") and lnk["href"].startswith("http")]
+        # 3) 抽取所有正文外部链接（以 http 开头，排除内部 /username/status）
+        outlinks = []
+        for a in item.select("div.tweet-content a"):
+            href = a.get("href", "")
+            if href.startswith("http"):
+                outlinks.append(href)
 
-        tweets.append({"id": tid, "date": date, "outlinks": outlinks})
+        tweets.append({"id": tid, "date": tweet_date, "outlinks": outlinks})
         if len(tweets) >= MAX_RESULTS:
             break
 
-    # 更新 since_id
+    # 更新 since_id.txt
     if tweets:
         SINCE_ID_FILE.write_text(str(tweets[0]["id"]))
     logger.info(f"Fetched {len(tweets)} new tweets (via Nitter)")
