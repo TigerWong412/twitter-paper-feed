@@ -49,4 +49,4 @@ jobs:
         run: |
           MODE="${{ github.event.inputs.mode }}"
           if [ -z "$MODE" ]; then MODE=live; fi
-          python monitor_v1.py --$MODE
+          python monitor-twitter-0auth1.0.py --$MODE
