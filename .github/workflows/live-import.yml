@@ -40,4 +40,4 @@ jobs:
         env:
           TW_BEARER_TOKEN: ${{ secrets.TW_BEARER_TOKEN }}
         run: |
-          python monitor.py --live
+          python monitor_v2.py --live
