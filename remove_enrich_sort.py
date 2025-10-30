@@ -4,8 +4,8 @@
 """
 Utility script to perform three sequential tasks:
 1. Remove duplicates based on DOI (Column G).
-2. Enrich missing metadata (Title, Abstract, etc.).
-3. Enforce date format (YYYY-MM-DD) and sort the sheet.
+2. Enrich ONLY the missing Abstract (Column F) and correct Publication Date (Column E).
+3. Enforce date format (YYYY-MM-DD) and sort the sheet by Pub Date.
 """
 
 import os
@@ -119,7 +119,7 @@ def fetch_abstract(doi: str) -> str:
         x = requests.get(f"https://api.crossref.org/works/{doi}.xml", timeout=15)
         if x.status_code == 200:
             root = ET.fromstring(x.content)
-            el = root.find(".//abstract")
+            el = root.find(".//abstract") 
             if el is not None:
                 return ET.tostring(el, method="text", encoding="unicode").strip()
     except Exception:
@@ -146,13 +146,13 @@ def format_date(pub_date_str: str) -> str:
         month = parts[1].zfill(2)
         return f"{year}-{month}-01"
     elif len(parts) >= 3:
-        # Full date (e.g., "2024-10-30") - format parts for consistency
+        # Full date (e.g., "2024-10-30")
         try:
             month = parts[1].zfill(2)
             day = parts[2].zfill(2)
             return f"{year}-{month}-{day}"
         except IndexError:
-            return pub_date_str # Return original if splitting fails oddly
+            return pub_date_str 
     return pub_date_str
 
 # ── DEDUPLICATION LOGIC ────────────────────────────────────────────────────────
@@ -161,10 +161,6 @@ def deduplicate_rows(sheet, all_data: List[List[str]]) -> bool:
     """
     Identifies and removes duplicate rows based on DOI (Column G).
     
-    Args:
-        sheet: gspread Worksheet object.
-        all_data: List of lists containing all cell values (including header).
-        
     Returns:
         True if rows were deleted, False otherwise.
     """
@@ -178,7 +174,7 @@ def deduplicate_rows(sheet, all_data: List[List[str]]) -> bool:
     logger.info(f"Deduplication: Processing {len(rows)} data rows to find duplicates...")
 
     for i, row in enumerate(rows):
-        sheet_row_num = i + 2  # 1-based sheet row number (skips header)
+        sheet_row_num = i + 2 
         
         try:
             key = row[DOI_COLUMN_INDEX].strip()
@@ -190,10 +186,8 @@ def deduplicate_rows(sheet, all_data: List[List[str]]) -> bool:
             continue
 
         if key in seen_keys:
-            # This is a duplicate, mark its sheet row number for deletion
             rows_to_delete.append(sheet_row_num)
         else:
-            # This is the first time we've seen this key.
             seen_keys.add(key)
     
     if not rows_to_delete:
@@ -203,14 +197,14 @@ def deduplicate_rows(sheet, all_data: List[List[str]]) -> bool:
     logger.info(f"Deduplication: Found {len(rows_to_delete)} duplicate row(s). Preparing batch delete...")
 
     requests = []
-    # Sort in reverse order to delete from the bottom up (prevents index shifting)
+    # Sort in reverse order to delete from the bottom up
     for row_num in sorted(rows_to_delete, reverse=True):
         requests.append({
             "deleteDimension": {
                 "range": {
                     "sheetId": sheet.id,
                     "dimension": "ROWS",
-                    "startIndex": row_num - 1,  # API is 0-indexed
+                    "startIndex": row_num - 1,  
                     "endIndex": row_num
                 }
             }
@@ -218,12 +212,12 @@ def deduplicate_rows(sheet, all_data: List[List[str]]) -> bool:
     
     try:
         body = {"requests": requests}
-        # Use the spreadsheet object for raw batch API requests (fixes 'range' KeyError)
         sheet.spreadsheet.batch_update(body)
         logger.info(f"Deduplication: Successfully deleted {len(requests)} duplicate rows.")
         return True
     except APIError as e:
         logger.error(f"Deduplication: Google API Error: Failed to batch delete rows: {e.response.json()}")
+        return False
     except Exception as e:
         logger.error(f"Deduplication: Failed to batch delete rows (General Error): {e}")
         return False
@@ -244,7 +238,7 @@ def enrich_and_sort_sheet(sheet):
     # --- 1. Deduplication Step ---
     if len(all_data) >= 2:
         if deduplicate_rows(sheet, all_data):
-            # If deletion happened, re-fetch data before enriching
+            # If deletion happened, MUST re-fetch data for accurate row indexes
             logger.info("Duplicates removed. Re-fetching fresh data for enrichment...")
             all_data = sheet.get_all_values()
     
@@ -252,75 +246,83 @@ def enrich_and_sort_sheet(sheet):
         logger.info("Sheet is empty or only contains a header. Stopping.")
         return
 
-    # Data starts from the second row (index 1)
-    header = all_data[0]
-    
-    rows_to_update = []
-    
-    logger.info(f"Processing {len(all_data) - 1} data rows for enrichment and date cleanup...")
+    # Assuming all data contains the header row now
+    header = all_data[0] 
+    data_was_modified = False # Master flag to track if any changes were made
 
-    # --- 2. Enrichment and Date Formatting ---
+    logger.info(f"Processing {len(all_data) - 1} data rows for date cleanup and abstract filling...")
+
+    # --- 2. Date Formatting and Abstract Enrichment ---
     for i, row in enumerate(all_data[1:]):
         sheet_row_num = i + 2
-        
-        # Check if key fields (Title, Abstract, Pub Date) are blank
-        needs_enrichment = not row[0].strip() or not row[5].strip() or not row[4].strip() 
+        row_was_modified = False 
 
-        # --- Date Formatting Check (Always run this) ---
+        # --- A. Initial Date Formatting (Always runs to fix format) ---
         original_pub_date = row[4].strip() if len(row) > 4 else ""
         formatted_date = format_date(original_pub_date)
         
-        # Check if the date needs cleaning or formatting
-        date_changed = False
         if formatted_date and formatted_date != original_pub_date:
             row[4] = formatted_date
-            date_changed = True
-            
-        if date_changed or needs_enrichment:
+            row_was_modified = True
+            logger.debug(f"Row {sheet_row_num}: Date fixed from '{original_pub_date}' to '{formatted_date}'")
+
+        # --- B. Enrichment Check (ONLY for missing Abstract) ---
+        needs_abstract = not row[5].strip()
+
+        if needs_abstract:
             
             doi = row[DOI_COLUMN_INDEX].strip() if len(row) > DOI_COLUMN_INDEX else ""
             url = row[URL_COLUMN_INDEX].strip() if len(row) > URL_COLUMN_INDEX else ""
 
-            # Try to get DOI from URL if missing
+            # Try to get DOI from URL if missing (needed to fetch abstract)
             if not doi and url:
                 doi = extract_doi(url)
                 if doi and len(row) > DOI_COLUMN_INDEX:
-                    row[DOI_COLUMN_INDEX] = doi # Update DOI column if found
+                    row[DOI_COLUMN_INDEX] = doi 
+                    row_was_modified = True # Updated DOI
 
             if doi:
                 try:
+                    # Fetching metadata is required to get the abstract and the authoritative date
                     meta = fetch_metadata(doi)
                     abstract = fetch_abstract(doi)
                     
-                    # Fill missing fields
-                    if not row[0].strip(): row[0] = meta.get("title", row[0])
-                    if not row[1].strip() and meta.get("authors"): row[1] = "; ".join(meta["authors"])
-                    if not row[2].strip(): row[2] = meta.get("journal", row[2])
-                    if not row[3].strip(): row[3] = meta.get("year", row[3]) or ""
+                    # Fill ONLY Abstract (F)
+                    if not row[5].strip() and abstract: 
+                        row[5] = abstract
+                        row_was_modified = True
+                    
+                    # Correct/Refine Date (E) using fetched metadata
+                    new_pub_date_raw = meta.get("pub_date", "")
+                    if new_pub_date_raw:
+                        formatted_fetched_date = format_date(new_pub_date_raw)
+                        
+                        # Use the fetched date if it's more complete (e.g., has month/day)
+                        # or if the current date is still not formatted correctly.
+                        if len(formatted_date) < len(formatted_fetched_date) or row[4].strip() != formatted_fetched_date:
+                             row[4] = formatted_fetched_date
+                             row_was_modified = True
+                    
+                    if row_was_modified:
+                        logger.info(f"Row {sheet_row_num}: Abstract filled or date refined (DOI: {doi}).")
+                    else:
+                        logger.debug(f"Row {sheet_row_num}: Abstract missing but not found in API, or already filled.")
 
-                    # Re-run date formatting on the newly fetched date, if applicable
-                    new_pub_date = meta.get("pub_date", "")
-                    if new_pub_date:
-                        row[4] = format_date(new_pub_date)
-                    
-                    if not row[5].strip() and abstract: row[5] = abstract
-                    
-                    rows_to_update.append(row)
-                    logger.info(f"Row {sheet_row_num} enriched successfully (DOI: {doi})")
 
                 except Exception as e:
-                    logger.warning(f"Could not enrich row {sheet_row_num} (DOI: {doi}): {e}")
-                    
-    # --- 3. Batch Update Data ---
-    if rows_to_update:
-        # Since we modified the rows in the all_data list, we write back the 
-        # entire modified data range (excluding header).
+                    logger.warning(f"Could not enrich row {sheet_row_num} (DOI: {doi}): API call failed or data missing. Error: {e}")
+        
+        if row_was_modified:
+            data_was_modified = True
+            
+    # --- 3. Batch Update Data (Only if anything changed) ---
+    if data_was_modified:
         range_to_update = f"A2:I{len(all_data)}" 
         data_to_write = all_data[1:]
 
-        logger.info(f"Writing {len(data_to_write)} total data rows back to sheet (including updates)...")
+        logger.info(f"Writing {len(data_to_write)} modified data rows back to sheet...")
         try:
-            # Update the entire range A2:I(last_row)
+            # Updates all rows from row 2 down with the corrected content
             sheet.update(range_to_update, data_to_write, value_input_option="USER_ENTERED")
             logger.info("Batch enrichment update complete.")
         except Exception as e:
@@ -335,7 +337,6 @@ def enrich_and_sort_sheet(sheet):
     
     try:
         # Sort by 5th column (E, Pub Date) in ascending order ("asc"). 
-        # Ascending order means older dates are on top, newer dates (latest articles) are at the bottom.
         sheet.sort((5, "asc"))
         
         logger.info("Sheet sorted successfully: latest articles are at the bottom.")
