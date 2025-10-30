@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-Utility script to enrich missing data, enforce date formatting, 
-and sort the Google Sheet by publication date.
+Utility script to perform three sequential tasks:
+1. Remove duplicates based on DOI (Column G).
+2. Enrich missing metadata (Title, Abstract, etc.).
+3. Enforce date format (YYYY-MM-DD) and sort the sheet.
 """
 
 import os
@@ -34,7 +36,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ── SHARED FUNCTIONS (Copied from original script) ─────────────────────────────
+# ── SHARED FUNCTIONS ───────────────────────────────────────────────────────────
 
 def init_sheet():
     """Initializes and returns the Google Sheet client and the Sheet1 object."""
@@ -125,8 +127,6 @@ def fetch_abstract(doi: str) -> str:
         
     return ""
 
-# ── NEW LOGIC FUNCTIONS ────────────────────────────────────────────────────────
-
 def format_date(pub_date_str: str) -> str:
     """
     Ensures date is in YYYY-MM-DD format for consistent sorting.
@@ -155,56 +155,133 @@ def format_date(pub_date_str: str) -> str:
             return pub_date_str # Return original if splitting fails oddly
     return pub_date_str
 
+# ── DEDUPLICATION LOGIC ────────────────────────────────────────────────────────
+
+def deduplicate_rows(sheet, all_data: List[List[str]]) -> bool:
+    """
+    Identifies and removes duplicate rows based on DOI (Column G).
+    
+    Args:
+        sheet: gspread Worksheet object.
+        all_data: List of lists containing all cell values (including header).
+        
+    Returns:
+        True if rows were deleted, False otherwise.
+    """
+    if len(all_data) < 2:
+        return False
+
+    rows = all_data[1:]
+    seen_keys = set()
+    rows_to_delete = []  # Stores 1-based GSheet row numbers
+
+    logger.info(f"Deduplication: Processing {len(rows)} data rows to find duplicates...")
+
+    for i, row in enumerate(rows):
+        sheet_row_num = i + 2  # 1-based sheet row number (skips header)
+        
+        try:
+            key = row[DOI_COLUMN_INDEX].strip()
+        except IndexError:
+            logger.warning(f"Skipping row {sheet_row_num}: row is malformed.")
+            continue
+
+        if not key:
+            continue
+
+        if key in seen_keys:
+            # This is a duplicate, mark its sheet row number for deletion
+            rows_to_delete.append(sheet_row_num)
+        else:
+            # This is the first time we've seen this key.
+            seen_keys.add(key)
+    
+    if not rows_to_delete:
+        logger.info("Deduplication: No duplicates found.")
+        return False
+
+    logger.info(f"Deduplication: Found {len(rows_to_delete)} duplicate row(s). Preparing batch delete...")
+
+    requests = []
+    # Sort in reverse order to delete from the bottom up (prevents index shifting)
+    for row_num in sorted(rows_to_delete, reverse=True):
+        requests.append({
+            "deleteDimension": {
+                "range": {
+                    "sheetId": sheet.id,
+                    "dimension": "ROWS",
+                    "startIndex": row_num - 1,  # API is 0-indexed
+                    "endIndex": row_num
+                }
+            }
+        })
+    
+    try:
+        body = {"requests": requests}
+        # Use the spreadsheet object for raw batch API requests (fixes 'range' KeyError)
+        sheet.spreadsheet.batch_update(body)
+        logger.info(f"Deduplication: Successfully deleted {len(requests)} duplicate rows.")
+        return True
+    except APIError as e:
+        logger.error(f"Deduplication: Google API Error: Failed to batch delete rows: {e.response.json()}")
+    except Exception as e:
+        logger.error(f"Deduplication: Failed to batch delete rows (General Error): {e}")
+        return False
+
+# ── MAIN LOGIC ─────────────────────────────────────────────────────────────────
 
 def enrich_and_sort_sheet(sheet):
     """
-    1. Fetches all data.
-    2. Fills in missing Title, Author, Journal, Date, and Abstract using DOI/URL.
-    3. Enforces date format.
-    4. Sorts the sheet by Pub Date (Column E) ascending.
+    Orchestrates the deduplication, enrichment, date formatting, and sorting.
     """
     try:
-        logger.info("Fetching all data from sheet for enrichment...")
+        logger.info("Fetching all data from sheet for initial processing...")
         all_data = sheet.get_all_values()
     except Exception as e:
         logger.error(f"Could not fetch data from sheet: {e}")
         return
 
+    # --- 1. Deduplication Step ---
+    if len(all_data) >= 2:
+        if deduplicate_rows(sheet, all_data):
+            # If deletion happened, re-fetch data before enriching
+            logger.info("Duplicates removed. Re-fetching fresh data for enrichment...")
+            all_data = sheet.get_all_values()
+    
     if len(all_data) < 2:
-        logger.info("Sheet is empty or only contains a header. Skipping enrichment.")
+        logger.info("Sheet is empty or only contains a header. Stopping.")
         return
 
     # Data starts from the second row (index 1)
     header = all_data[0]
+    
     rows_to_update = []
     
-    # We will build a complete list of rows to update using batch_update
-    # We only update the cells that actually need changing
-    
-    logger.info(f"Processing {len(all_data) - 1} data rows for missing information...")
+    logger.info(f"Processing {len(all_data) - 1} data rows for enrichment and date cleanup...")
 
+    # --- 2. Enrichment and Date Formatting ---
     for i, row in enumerate(all_data[1:]):
-        # The sheet row number (1-indexed) is i + 2
         sheet_row_num = i + 2
         
-        # Determine if we need to fetch new data (e.g., Title or Abstract is blank)
-        needs_enrichment = not row[0] or not row[5] or not row[4] # Title, Abstract, Pub Date
+        # Check if key fields (Title, Abstract, Pub Date) are blank
+        needs_enrichment = not row[0].strip() or not row[5].strip() or not row[4].strip() 
 
-        # --- 1. Date Formatting Check (Always run this) ---
+        # --- Date Formatting Check (Always run this) ---
         original_pub_date = row[4].strip() if len(row) > 4 else ""
         formatted_date = format_date(original_pub_date)
         
+        # Check if the date needs cleaning or formatting
+        date_changed = False
         if formatted_date and formatted_date != original_pub_date:
-            # We found a better formatted date, mark for update
             row[4] = formatted_date
-            rows_to_update.append(row) # Mark the whole row for later batch update
-            needs_enrichment = True # Ensure this row is included in the batch update payload
-
-        # --- 2. Enrichment Logic ---
-        if needs_enrichment:
+            date_changed = True
+            
+        if date_changed or needs_enrichment:
+            
             doi = row[DOI_COLUMN_INDEX].strip() if len(row) > DOI_COLUMN_INDEX else ""
             url = row[URL_COLUMN_INDEX].strip() if len(row) > URL_COLUMN_INDEX else ""
 
+            # Try to get DOI from URL if missing
             if not doi and url:
                 doi = extract_doi(url)
                 if doi and len(row) > DOI_COLUMN_INDEX:
@@ -216,17 +293,17 @@ def enrich_and_sort_sheet(sheet):
                     abstract = fetch_abstract(doi)
                     
                     # Fill missing fields
-                    if not row[0]: row[0] = meta.get("title", row[0])
-                    if not row[1] and meta.get("authors"): row[1] = "; ".join(meta["authors"])
-                    if not row[2]: row[2] = meta.get("journal", row[2])
-                    if not row[3]: row[3] = meta.get("year", row[3]) or ""
+                    if not row[0].strip(): row[0] = meta.get("title", row[0])
+                    if not row[1].strip() and meta.get("authors"): row[1] = "; ".join(meta["authors"])
+                    if not row[2].strip(): row[2] = meta.get("journal", row[2])
+                    if not row[3].strip(): row[3] = meta.get("year", row[3]) or ""
 
                     # Re-run date formatting on the newly fetched date, if applicable
                     new_pub_date = meta.get("pub_date", "")
                     if new_pub_date:
                         row[4] = format_date(new_pub_date)
                     
-                    if not row[5] and abstract: row[5] = abstract
+                    if not row[5].strip() and abstract: row[5] = abstract
                     
                     rows_to_update.append(row)
                     logger.info(f"Row {sheet_row_num} enriched successfully (DOI: {doi})")
@@ -236,21 +313,16 @@ def enrich_and_sort_sheet(sheet):
                     
     # --- 3. Batch Update Data ---
     if rows_to_update:
-        # Data is a list of lists: [[rowA], [rowB], ...]
-        # Map the updated rows back to the correct A1 notation range for gspread
+        # Since we modified the rows in the all_data list, we write back the 
+        # entire modified data range (excluding header).
         range_to_update = f"A2:I{len(all_data)}" 
-        
-        # We need to map the updated rows to their current position in the all_data list
-        # We can just write back the *entire data range* (excluding header) if we collect all changes.
-        
-        # Collect all data rows, including the header
-        data_to_write = [header] + all_data[1:]
+        data_to_write = all_data[1:]
 
-        logger.info(f"Writing {len(rows_to_update)} row changes back to sheet...")
+        logger.info(f"Writing {len(data_to_write)} total data rows back to sheet (including updates)...")
         try:
             # Update the entire range A2:I(last_row)
-            sheet.update(range_to_update, data_to_write[1:], value_input_option="USER_ENTERED")
-            logger.info("Batch update complete.")
+            sheet.update(range_to_update, data_to_write, value_input_option="USER_ENTERED")
+            logger.info("Batch enrichment update complete.")
         except Exception as e:
             logger.error(f"Failed to write batch update to sheet: {e}")
             
@@ -259,17 +331,11 @@ def enrich_and_sort_sheet(sheet):
 
 
     # --- 4. Final Sort by Column E (Pub Date) Ascending ---
-    # Col E is dimension index 4 (0-based)
     logger.info("Starting final sort by Column E (Pub Date) in ascending order.")
     
-    # Range is the full data area, skipping header (A2 to the last row used)
-    # The API requires GridRange, but gspread's sort method simplifies this.
     try:
-        # The range is often derived from the number of rows: A2:I{last_row_index}
-        sort_range = f"A2:I{len(all_data)}" 
-
-        # Using the simplified Worksheet.sort method (which uses batchUpdate internally)
-        # Note: (5, "asc") means 5th column (E) in ascending order.
+        # Sort by 5th column (E, Pub Date) in ascending order ("asc"). 
+        # Ascending order means older dates are on top, newer dates (latest articles) are at the bottom.
         sheet.sort((5, "asc"))
         
         logger.info("Sheet sorted successfully: latest articles are at the bottom.")
@@ -282,7 +348,7 @@ def enrich_and_sort_sheet(sheet):
 # ── MAIN EXECUTION ─────────────────────────────────────────────────────────────
 
 def main():
-    logger.info("Starting enrichment and sort process...")
+    logger.info("Starting combined utility process (Deduplicate, Enrich, Sort)...")
     sheet = init_sheet()
     if sheet:
         enrich_and_sort_sheet(sheet)
@@ -290,16 +356,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
-
-### Next Steps
-
-1.  **Save:** Save the code above as `enrich_and_sort.py`.
-2.  **Update GitHub Action (if using):** If you are using the GitHub Action, you need to update the final `run` command in your `deduplicate.yml` file to run this new file instead:
-
-    ```yaml
-    # In your .github/workflows/deduplicate.yml file:
-    # ...
-    - name: Run the enrichment and sort script
-      run: python enrich_and_sort.py 
-    
