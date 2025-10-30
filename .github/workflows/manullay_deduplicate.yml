@@ -42,4 +42,4 @@ jobs:
           EOF
 
       - name: Run the deduplication script
-        run: python remove_duplicates.py
+        run: python remove_enrich_sort.py
