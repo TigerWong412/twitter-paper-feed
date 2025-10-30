@@ -1,4 +1,4 @@
-name: Clean Google Sheet Duplicates
+name: 2-Deduplicates_enrich_sort
 
 on:
   workflow_dispatch: # Allows you to run it manually from the Actions tab
