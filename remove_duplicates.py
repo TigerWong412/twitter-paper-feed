@@ -12,6 +12,7 @@ the first occurrence of each DOI.
 
 import logging
 import gspread
+from gspread.exceptions import APIError  # <-- IMPORT THIS
 from google.oauth2.service_account import Credentials
 
 # ── CONFIG ─────────────────────────────────────────────────────────────────────
@@ -122,10 +123,25 @@ def deduplicate_sheet(sheet):
         })
     
     try:
-        sheet.batch_update(requests)
+        # --- START OF FIX ---
+        
+        # We must wrap our list of requests in a dictionary with a "requests" key.
+        body = {"requests": requests}
+        
+        # Call batch_update on the *spreadsheet* object, not the *sheet* object.
+        # This sends the raw request without gspread trying to modify it.
+        sheet.spreadsheet.batch_update(body)
+        
         logger.info(f"Successfully deleted {len(requests)} duplicate rows.")
+    
+    # Catch the specific APIError for better debugging
+    except APIError as e:
+        logger.error(f"Google API Error: Failed to batch delete rows: {e.response.json()}")
     except Exception as e:
-        logger.error(f"Failed to batch delete rows: {e}")
+        # Catch any other unexpected errors
+        logger.error(f"Failed to batch delete rows (General Error): {e}")
+        
+    # --- END OF FIX ---
 
 # ── MAIN EXECUTION ─────────────────────────────────────────────────────────────
 
