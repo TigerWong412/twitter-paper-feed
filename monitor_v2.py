@@ -22,8 +22,8 @@ SPREADSHEET_ID     = "1oYdQyh1tqPA3821PE97ru8aL8jZOe1e7vKLp2x7BSF8"  # Google Sh
 SERVICE_ACCOUNT_FN = "service_account.json"                     # 服务账号 JSON 文件
 HISTORICAL_FILE    = Path("extracted_tweets.txt")               # 历史链接文件
 SINCE_ID_FILE      = Path("since_id.txt")                       # 记录上次处理的 tweet ID
-START_TIME         = "2025-05-27T00:00:00Z"                     # 初次抓取起始时间（ISO8601）
-MAX_RESULTS        = 90                                         # 每次最多抓取的 tweet 数（<=100）
+START_TIME         = "2025-08-20T00:00:00Z"                     # 初次抓取起始时间（ISO8601）
+MAX_RESULTS        = 100                                         # 每次最多抓取的 tweet 数（<=100）
 
 # 请求头（用于 DOI 解析时访问出版社站）
 REQUEST_HEADERS = {"User-Agent": "Mozilla/5.0"}
